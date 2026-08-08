@@ -1,5 +1,5 @@
 # PurView
-Preview **PureRef(1.10/1.11.1)** boards (`.pur`) directly inside Obsidian.
+Preview **PureRef** boards (`.pur`) directly inside Obsidian. (Version 1.10/1.11.1 only!)
 
 <img width="2558" height="1373" alt="image" src="https://github.com/user-attachments/assets/9b8253f7-bdf3-4080-8e4c-9caec450e975" />
 
