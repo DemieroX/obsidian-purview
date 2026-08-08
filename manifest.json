@@ -1,8 +1,8 @@
 {
   "id": "purview",
   "name": "PurView",
-  "version": "1.0.2",
-  "minAppVersion": "1.0.2",
+  "version": "1.0.0",
+  "minAppVersion": "1.0.0",
   "description": "View PureRef boards natively.",
   "author": "demiero",
   "authorUrl": "https://github.com/DemieroX",
