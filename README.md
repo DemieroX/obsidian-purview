@@ -14,7 +14,10 @@ The parser logic is recreated within JavaScript in a web-environment to read and
 - Optional matching with your Obsidian theme background color.
 
 ## Installation
-
-1. Open Obsidian settings and go to **Community plugins**.
-2. Make sure community plugins are enabled, then click **Browse**.
-3. Search for **PurView**, click **Install**, and then **Enable**.
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest release.
+2. Open your Obsidian vault in your file explorer.
+3. Navigate to `.obsidian/plugins/` (if the `plugins` folder does not exist, create it).
+4. Create a new folder inside `plugins` named `purview`.
+5. Place the downloaded `main.js`, `manifest.json`, and `styles.css` files into the `purview` folder.
+6. Go to **Settings** > **Community plugins** and click the **Reload plugins** button (folder icon).
+7. Enable **PurView** in the community plugins list.
