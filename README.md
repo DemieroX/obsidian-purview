@@ -12,3 +12,9 @@ The parser logic is recreated within JavaScript in a web-environment to read and
 ## Features
 - Open `.pur` files inside an Obsidian tab, without opening additional software.
 - Optional matching with your Obsidian theme background color.
+
+## Installation
+
+1. Open Obsidian settings and go to **Community plugins**.
+2. Make sure community plugins are enabled, then click **Browse**.
+3. Search for **PurView**, click **Install**, and then **Enable**.
