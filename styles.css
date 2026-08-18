@@ -16,7 +16,18 @@
   background: #2a2a2a;
 }
 .pureview-container.match-theme #viewport {
-  background: var(--background-primary);
+    background: var(--background-primary);
+}
+
+.pureview-error {
+    max-width: 36rem;
+    margin: 2rem auto;
+    padding: 1rem 1.25rem;
+    border: 1px solid var(--background-modifier-error);
+    border-radius: 8px;
+    color: var(--text-error);
+    background: var(--background-primary-alt);
+    line-height: 1.5;
 }
 #viewport.dragging {
   cursor: grabbing;
