@@ -4,15 +4,231 @@ const {
   PluginSettingTab,
   Setting,
   TFile,
+  Notice,
 } = require("obsidian");
+const path = require("path");
+const fs = require("fs");
+const os = require("os");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+const execFileAsync = promisify(execFile);
 
 // ==========================================
 // 1. PURE-REF PARSER
 // ==========================================
+const PURVIEW_VERSION = "1.2.0";
 const GRAPHICS_IMAGE_ITEM = 34;
 const GRAPHICS_TEXT_ITEM = 32;
 const PNG_HEAD = [137, 80, 78, 71, 13, 10, 26, 10];
 const PNG_FOOT = [0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130];
+
+function defaultPureRefPath() {
+  if (process.platform === "darwin") {
+    return "/Applications/PureRef.app/Contents/MacOS/PureRef";
+  }
+  if (process.platform === "win32") {
+    return "C:\\Program Files\\PureRef\\PureRef.exe";
+  }
+  return "";
+}
+
+function resolveVaultFilePath(plugin, file) {
+  const adapter = plugin.app.vault.adapter;
+  if (typeof adapter.getFullPath === "function") {
+    return adapter.getFullPath(file.path);
+  }
+  return path.join(adapter.basePath, file.path);
+}
+
+function isPureRefInstalled(pureRefPath) {
+  if (pureRefPath && fs.existsSync(pureRefPath)) return true;
+  if (process.platform === "darwin") {
+    return fs.existsSync("/Applications/PureRef.app");
+  }
+  if (process.platform === "win32" && pureRefPath) {
+    return fs.existsSync(pureRefPath);
+  }
+  return false;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runPureRefCommands(purPath, outPath, pureRefPath, exportMaxSize) {
+  const commands = [
+    `load;${purPath}`,
+    `exportScene;${outPath};${exportMaxSize};${exportMaxSize};true;true;true`,
+    "exit",
+  ];
+
+  if (process.platform === "darwin" && fs.existsSync("/Applications/PureRef.app")) {
+    const args = ["-a", "PureRef", "--args"];
+    for (const command of commands) {
+      args.push("-c", command);
+    }
+    await execFileAsync("open", args, { timeout: 120000 });
+    return;
+  }
+
+  if (!pureRefPath || !fs.existsSync(pureRefPath)) {
+    throw new Error("PureRef executable not found");
+  }
+
+  const args = [];
+  for (const command of commands) {
+    args.push("-c", command);
+  }
+  await execFileAsync(pureRefPath, args, { timeout: 120000 });
+}
+
+async function exportViaPureRef(purPath, pureRefPath, exportMaxSize = 4000) {
+  if (!isPureRefInstalled(pureRefPath)) return null;
+  const outPath = path.join(
+    os.tmpdir(),
+    `purview-export-${process.pid}-${Date.now()}.png`,
+  );
+  try {
+    await runPureRefCommands(purPath, outPath, pureRefPath, exportMaxSize);
+    for (let attempt = 0; attempt < 60 && !fs.existsSync(outPath); attempt++) {
+      await sleep(500);
+    }
+    if (!fs.existsSync(outPath)) return null;
+    const imageBytes = new Uint8Array(fs.readFileSync(outPath));
+    fs.unlinkSync(outPath);
+    if (imageBytes.length < 128) return null;
+    const mimeType = detectImageMime(imageBytes);
+    const dims = imageDimsFromBytes(imageBytes, mimeType);
+    const w = dims.w || exportMaxSize;
+    const h = dims.h || exportMaxSize;
+    return {
+      version: "v2-export",
+      canvas: [0, 0, w, h],
+      zoom: 1,
+      xCanvas: 0,
+      yCanvas: 0,
+      folderLocation: "",
+      images: [
+        {
+          imageBytes,
+          mimeType,
+          transforms: [
+            {
+              type: "image",
+              id: 0,
+              zLayer: 1,
+              matrix: [1, 0, 0, 1],
+              x: w / 2,
+              y: h / 2,
+              points: [
+                [-w / 2, w / 2],
+                [-h / 2, h / 2],
+              ],
+              textChildren: [],
+            },
+          ],
+        },
+      ],
+      text: [],
+    };
+  } catch (err) {
+    try {
+      fs.unlinkSync(outPath);
+    } catch (_) {
+      // ignore cleanup errors
+    }
+    console.warn("PurView: PureRef export failed", err);
+    return null;
+  }
+}
+
+function detectPurVersion(bytes) {
+  if (bytes.length < 12) return "unknown";
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const signature = view.getUint32(0, false);
+  let version = "";
+  for (let i = 4; i < 12; i += 2) {
+    const code = view.getUint16(i, false);
+    if (code === 0) break;
+    version += String.fromCharCode(code);
+  }
+  if (signature === 8 && version.startsWith("1.")) return "v1";
+  if (signature === 6 && version.startsWith("2.")) return "v2";
+  return "unknown";
+}
+
+function detectImageMime(bytes) {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  ) {
+    return "image/png";
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+    return "image/jpeg";
+  }
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57 &&
+    bytes[9] === 0x45 &&
+    bytes[10] === 0x42 &&
+    bytes[11] === 0x50
+  ) {
+    return "image/webp";
+  }
+  if (
+    bytes.length >= 6 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x38
+  ) {
+    return "image/gif";
+  }
+  return "application/octet-stream";
+}
+
+function imageDimsFromBytes(imageBytes, mimeType) {
+  if (mimeType === "image/png" && imageBytes.length >= 24) {
+    const dv = new DataView(
+      imageBytes.buffer,
+      imageBytes.byteOffset,
+      imageBytes.byteLength,
+    );
+    return { w: dv.getUint32(16, false), h: dv.getUint32(20, false) };
+  }
+  if (
+    mimeType === "image/jpeg" &&
+    imageBytes.length > 4 &&
+    imageBytes[0] === 0xff &&
+    imageBytes[1] === 0xd8
+  ) {
+    let i = 2;
+    while (i < imageBytes.length - 8) {
+      if (imageBytes[i] !== 0xff) {
+        i += 1;
+        continue;
+      }
+      const marker = imageBytes[i + 1];
+      if (marker === 0xc0 || marker === 0xc2) {
+        return {
+          h: (imageBytes[i + 5] << 8) | imageBytes[i + 6],
+          w: (imageBytes[i + 7] << 8) | imageBytes[i + 8],
+        };
+      }
+      const segLen = (imageBytes[i + 2] << 8) | imageBytes[i + 3];
+      i += 2 + segLen;
+    }
+  }
+  return { w: 0, h: 0 };
+}
 
 function hsvToRgbUnit(h, s, v) {
   if (s === 0) return [v, v, v];
@@ -59,7 +275,7 @@ function findSequence(bytes, seq, from) {
   return -1;
 }
 
-function parse(arrayBuffer) {
+function parseV1(arrayBuffer) {
   const bytes = new Uint8Array(arrayBuffer);
   const view = new DataView(arrayBuffer);
   let pos = 0;
@@ -143,14 +359,16 @@ function parse(arrayBuffer) {
       if (start >= 4) {
         images.push({
           address: [pos, pos + 4],
-          pngBytes: bytes.slice(pos, pos + 4),
+          imageBytes: bytes.slice(pos, pos + 4),
+          mimeType: "image/png",
           transforms: [],
         });
         erase(4);
       } else {
         images.push({
           address: [pos + start, pos + end],
-          pngBytes: bytes.slice(pos + start, pos + end),
+          imageBytes: bytes.slice(pos + start, pos + end),
+          mimeType: "image/png",
           transforms: [],
         });
         erase(end);
@@ -159,7 +377,8 @@ function parse(arrayBuffer) {
     while (u32(8) !== GRAPHICS_IMAGE_ITEM && u32(8) !== GRAPHICS_TEXT_ITEM) {
       images.push({
         address: [pos, pos + 4],
-        pngBytes: bytes.slice(pos, pos + 4),
+        imageBytes: bytes.slice(pos, pos + 4),
+        mimeType: "image/png",
         transforms: [],
       });
       erase(4);
@@ -294,22 +513,22 @@ function parse(arrayBuffer) {
   }
 
   function isDuplicateMarker(img) {
-    if (img.pngBytes.length !== 4) return false;
+    if (img.imageBytes.length !== 4) return false;
     return !(
-      img.pngBytes[0] === 0xff &&
-      img.pngBytes[1] === 0xff &&
-      img.pngBytes[2] === 0xff &&
-      img.pngBytes[3] === 0xff
+      img.imageBytes[0] === 0xff &&
+      img.imageBytes[1] === 0xff &&
+      img.imageBytes[2] === 0xff &&
+      img.imageBytes[3] === 0xff
     );
   }
 
   for (const img of images) {
     if (isDuplicateMarker(img)) {
       const targetId =
-        ((img.pngBytes[0] << 24) |
-          (img.pngBytes[1] << 16) |
-          (img.pngBytes[2] << 8) |
-          img.pngBytes[3]) >>>
+        ((img.imageBytes[0] << 24) |
+          (img.imageBytes[1] << 16) |
+          (img.imageBytes[2] << 8) |
+          img.imageBytes[3]) >>>
         0;
       for (const other of images) {
         if (other.transforms.length && other.transforms[0].id === targetId) {
@@ -320,6 +539,7 @@ function parse(arrayBuffer) {
   }
 
   return {
+    version: "v1",
     canvas: header.canvas,
     zoom: header.zoom,
     xCanvas: header.xCanvas,
@@ -329,7 +549,41 @@ function parse(arrayBuffer) {
     text: textItems,
   };
 }
-const PureRefParser = { parse };
+
+async function parseV2(_arrayBuffer, plugin, file) {
+  const pureRefPath = plugin?.settings?.pureRefPath || defaultPureRefPath();
+  if (!isPureRefInstalled(pureRefPath)) {
+    throw new Error(
+      "PureRef 2.x boards require PureRef to be installed. Get it at https://www.pureref.com",
+    );
+  }
+  if (!file) {
+    throw new Error("Could not resolve the .pur file path for PureRef export.");
+  }
+
+  const purPath = resolveVaultFilePath(plugin, file);
+  console.info(`PurView ${PURVIEW_VERSION}: exporting via PureRef`, purPath);
+  const exported = await exportViaPureRef(purPath, pureRefPath);
+  if (exported) {
+    console.info(`PurView ${PURVIEW_VERSION}: rendered via PureRef export`);
+    return exported;
+  }
+  throw new Error(
+    "PureRef could not export this board. Check the developer console for details.",
+  );
+}
+
+const PureRefParser = {
+  async parse(arrayBuffer, plugin, file) {
+    const bytes = new Uint8Array(arrayBuffer);
+    const version = detectPurVersion(bytes);
+    if (version === "v2") return parseV2(arrayBuffer, plugin, file);
+    if (version === "v1") return parseV1(arrayBuffer);
+    throw new Error(
+      "Unsupported .pur file. PurView supports PureRef 1.10/1.11.1 and 2.x boards.",
+    );
+  },
+};
 
 // ==========================================
 // 2. PLUGIN LOGIC & SETTINGS
@@ -339,6 +593,7 @@ const VIEW_TYPE_PURVIEW = "pureview-view";
 const DEFAULT_SETTINGS = {
   matchThemeBackground: true,
   openInNewTab: true,
+  pureRefPath: "",
 };
 
 class PureViewView extends ItemView {
@@ -465,6 +720,15 @@ class PureViewView extends ItemView {
       "wheel",
       (e) => {
         e.preventDefault();
+        const absX = Math.abs(e.deltaX);
+        const absY = Math.abs(e.deltaY);
+
+        if (!e.ctrlKey && absX > absY) {
+          view.x -= e.deltaX;
+          applyView();
+          return;
+        }
+
         const rect = els.viewport.getBoundingClientRect();
         const mx = e.clientX - rect.left,
           my = e.clientY - rect.top;
@@ -480,6 +744,12 @@ class PureViewView extends ItemView {
     );
   }
 
+  showError(message) {
+    if (!this.els || !this.els.world) return;
+    this.els.world.innerHTML = `<div class="pureview-error">${message}</div>`;
+    this.bounds = null;
+  }
+
   async setFileData(file) {
     this.file = file;
     this.leaf.tabHeaderInnerTitleEl?.setText(file.basename);
@@ -493,11 +763,22 @@ class PureViewView extends ItemView {
     }
 
     const arrayBuffer = await this.app.vault.readBinary(file);
+    const version = detectPurVersion(new Uint8Array(arrayBuffer));
+    let loadingNotice = null;
+    if (version === "v2") {
+      loadingNotice = new Notice("PurView: rendering board...", 0);
+    }
     try {
-      const board = PureRefParser.parse(arrayBuffer);
+      const board = await PureRefParser.parse(arrayBuffer, this.plugin, file);
+      loadingNotice?.hide();
       this.renderBoard(board);
     } catch (err) {
+      loadingNotice?.hide();
       console.error(err);
+      this.showError(
+        `Could not open ${file.basename}. ${err?.message || "Unknown error."}`,
+      );
+      new Notice(`PurView: failed to open ${file.basename}`);
     }
   }
 
@@ -512,14 +793,16 @@ class PureViewView extends ItemView {
     };
     const jobs = [];
 
-    function pngDims(pngBytes) {
-      if (pngBytes.length < 24) return { w: 0, h: 0 };
-      const dv = new DataView(
-        pngBytes.buffer,
-        pngBytes.byteOffset,
-        pngBytes.byteLength,
-      );
-      return { w: dv.getUint32(16, false), h: dv.getUint32(20, false) };
+    function imageDims(imageBytes, mimeType) {
+      if (mimeType === "image/png" && imageBytes.length >= 24) {
+        const dv = new DataView(
+          imageBytes.buffer,
+          imageBytes.byteOffset,
+          imageBytes.byteLength,
+        );
+        return { w: dv.getUint32(16, false), h: dv.getUint32(20, false) };
+      }
+      return { w: 0, h: 0 };
     }
     function bbox(points) {
       return { min: Math.min(...points), max: Math.max(...points) };
@@ -537,7 +820,7 @@ class PureViewView extends ItemView {
     }
 
     function renderImageTransform(w, image, transform, bx) {
-      const dims = pngDims(image.pngBytes);
+      const dims = imageDims(image.imageBytes, image.mimeType);
       const nx = bbox(
         transform.points[0] && transform.points[0].length
           ? transform.points[0]
@@ -561,15 +844,22 @@ class PureViewView extends ItemView {
 
       if (!image._blobUrl) {
         image._blobUrl = URL.createObjectURL(
-          new Blob([image.pngBytes], { type: "image/png" }),
+          new Blob([image.imageBytes], { type: image.mimeType }),
         );
       }
       const img = el("img");
       img.src = image._blobUrl;
-      img.style.width = dims.w + "px";
-      img.style.height = dims.h + "px";
-      img.style.left = -(nx.min + dims.w / 2) + "px";
-      img.style.top = -(ny.min + dims.h / 2) + "px";
+      if (dims.w > 0 && dims.h > 0) {
+        img.style.width = dims.w + "px";
+        img.style.height = dims.h + "px";
+        img.style.left = -(nx.min + dims.w / 2) + "px";
+        img.style.top = -(ny.min + dims.h / 2) + "px";
+      } else {
+        img.style.maxWidth = cropW + "px";
+        img.style.maxHeight = cropH + "px";
+        img.style.left = "0";
+        img.style.top = "0";
+      }
       img.draggable = false;
 
       cropDiv.appendChild(img);
@@ -682,6 +972,7 @@ class PureViewView extends ItemView {
 class PurViewPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    console.info(`PurView ${PURVIEW_VERSION} loaded`);
 
     this.registerView(
       VIEW_TYPE_PURVIEW,
@@ -739,8 +1030,7 @@ class PurViewSettingTab extends PluginSettingTab {
     containerEl.createEl("h2", { text: "PurView" });
 
     containerEl.createEl("p", {
-      text: "This plugin only works with boards that use PureRef 1.11.1.",
-      attr: { style: "color: var(--text-error);" },
+      text: "PureRef 1.x boards open directly. PureRef 2.x boards require PureRef installed on your computer.",
     });
 
     new Setting(containerEl)
@@ -767,6 +1057,21 @@ class PurViewSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.openInNewTab)
           .onChange(async (value) => {
             this.plugin.settings.openInNewTab = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("PureRef executable path")
+      .setDesc(
+        "Required for PureRef 2.x boards. Leave blank to auto-detect. macOS: /Applications/PureRef.app/Contents/MacOS/PureRef",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder(defaultPureRefPath())
+          .setValue(this.plugin.settings.pureRefPath)
+          .onChange(async (value) => {
+            this.plugin.settings.pureRefPath = value.trim();
             await this.plugin.saveSettings();
           }),
       );
